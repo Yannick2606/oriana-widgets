@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>orIAna — Cockpit de matching</title>
+<style>
+  :root {
+    --safran:#F5A340; --orange:#F26834; --magenta:#ED1479;
+    --rouge:#E1212D; --grenat:#A21F30; --pourpre:#7F1B52;
+    --dark:#1A0E24; --dark2:#0B050E;
+    --txt:#2C2C2A; --muted:#6b6b72; --line:rgba(127,27,82,.12);
+  }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  html,body { height:100%; }
+  body {
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    color:var(--txt); background:#faf7fb;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { padding:18px; max-width:1100px; margin:0 auto; }
+
+  /* En-tête demande */
+  .head {
+    background:linear-gradient(120deg,var(--pourpre),var(--grenat) 55%,var(--rouge));
+    border-radius:16px; padding:20px 24px; color:#fff;
+    display:flex; justify-content:space-between; align-items:center; gap:20px;
+  }
+  .head .who { font-size:20px; font-weight:600; letter-spacing:.2px; }
+  .head .sub { font-size:13px; opacity:.85; margin-top:3px; }
+  .head .crit { display:flex; gap:8px; flex-wrap:wrap; margin-top:12px; }
+  .pill {
+    font-size:12px; padding:5px 11px; border-radius:20px;
+    background:rgba(255,255,255,.16); color:#fff; white-space:nowrap;
+  }
+  .head .brand { text-align:right; }
+  .head .brand .logo { font-size:22px; font-weight:600; }
+  .head .brand .logo .ia { color:var(--safran); }
+  .head .brand .tag { font-size:10px; letter-spacing:2px; opacity:.8; margin-top:2px; }
+
+  .section-title {
+    font-size:13px; text-transform:uppercase; letter-spacing:1px;
+    color:var(--pourpre); font-weight:600; margin:22px 4px 12px;
+    display:flex; align-items:center; gap:8px;
+  }
+  .count { color:var(--muted); font-weight:400; text-transform:none; letter-spacing:0; font-size:12px; }
+
+  /* Grille de biens */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:14px; }
+  .card {
+    background:#fff; border:1px solid var(--line); border-radius:14px;
+    padding:16px; display:flex; gap:14px; align-items:flex-start;
+    transition:transform .12s ease, box-shadow .12s ease;
+  }
+  .card:hover { transform:translateY(-2px); box-shadow:0 6px 20px rgba(127,27,82,.10); }
+  .card .info { flex:1; min-width:0; }
+  .card .ref { font-size:12px; color:var(--muted); }
+  .card .titre { font-size:15px; font-weight:600; margin:2px 0 4px; }
+  .card .meta { font-size:13px; color:#444; line-height:1.5; }
+  .card .price { font-size:14px; font-weight:600; color:var(--grenat); margin-top:6px; }
+
+  /* Anneau de score */
+  .ring { width:64px; height:64px; flex-shrink:0; position:relative; }
+  .ring svg { transform:rotate(-90deg); }
+  .ring .val {
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    font-size:15px; font-weight:700;
+  }
+  .subscores { display:flex; gap:5px; flex-wrap:wrap; margin-top:9px; }
+  .sub {
+    font-size:11px; padding:3px 7px; border-radius:6px;
+    background:#f3eef5; color:var(--pourpre);
+  }
+  .sub b { font-weight:700; }
+
+  .empty {
+    background:#fff; border:1px dashed var(--line); border-radius:14px;
+    padding:34px; text-align:center; color:var(--muted); font-size:14px;
+  }
+  .empty .big { font-size:15px; color:var(--txt); font-weight:600; margin-bottom:6px; }
+  .waiting { padding:40px; text-align:center; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap" id="app">
+  <div class="waiting">Sélectionnez une demande pour voir les rapprochements…</div>
+</div>
+
+<script src="https://docs.getgrist.com/grist-plugin-api.js"></script>
+<script>
+(function(){
+  const app = document.getElementById('app');
+
+  // Cache des tables liées (chargées via full access)
+  let LOTS = {}, SITES = {}, ADRESSES = {}, SOCIETES = {}, MATCH = [];
+
+  function euro(n){
+    if(n===null||n===undefined||n==="") return "";
+    return Number(n).toLocaleString('fr-FR') + " €";
+  }
+  function scoreColor(s){
+    if(s>=85) return '#1D9E75';      // vert
+    if(s>=65) return '#F5A340';      // safran
+    if(s>=45) return '#F26834';      // orange
+    return '#E1212D';                // rouge
+  }
+  function ring(score){
+    const s = Math.max(0,Math.min(100,score||0));
+    const r=28, c=2*Math.PI*r, off=c*(1-s/100), col=scoreColor(s);
+    return `<div class="ring">
+      <svg width="64" height="64">
+        <circle cx="32" cy="32" r="${r}" fill="none" stroke="#eee" stroke-width="6"/>
+        <circle cx="32" cy="32" r="${r}" fill="none" stroke="${col}" stroke-width="6"
+                stroke-dasharray="${c.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}"
+                stroke-linecap="round"/>
+      </svg>
+      <div class="val" style="color:${col}">${Math.round(s)}%</div>
+    </div>`;
+  }
+
+  // Charge toutes les tables de référence (nécessite full access)
+  async function chargerReferentiels(){
+    try {
+      const tabs = await grist.docApi.listTables();
+      async function fetchTab(name){
+        try { return await grist.docApi.fetchTable(name); } catch(e){ return null; }
+      }
+      const [lots, sites, adr, soc, match] = await Promise.all([
+        fetchTab('Lots'), fetchTab('Sites'), fetchTab('Adresses'),
+        fetchTab('Societes'), fetchTab('Matching_demandes_lots')
+      ]);
+      LOTS = pivot(lots); SITES = pivot(sites);
+      ADRESSES = pivot(adr); SOCIETES = pivot(soc);
+      MATCH = toRows(match);
+    } catch(e){ console.error('Référentiels :', e); }
+  }
+
+  // Transforme {colonne:[valeurs]} en {rowId: {champ:valeur}}
+  function pivot(t){
+    const out={};
+    if(!t || !t.id) return out;
+    t.id.forEach((rid,i)=>{
+      const rec={};
+      for(const col in t){ if(col!=='id') rec[col]=t[col][i]; }
+      out[rid]=rec;
+    });
+    return out;
+  }
+  function toRows(t){
+    const rows=[];
+    if(!t || !t.id) return rows;
+    t.id.forEach((rid,i)=>{
+      const rec={id:rid};
+      for(const col in t){ if(col!=='id') rec[col]=t[col][i]; }
+      rows.push(rec);
+    });
+    return rows;
+  }
+
+  function villeDuLot(lotId){
+    const lot = LOTS[lotId]; if(!lot) return "";
+    const site = SITES[lot.site_id]; if(!site) return "";
+    const adr = ADRESSES[site.adresse_id]; if(!adr) return "";
+    return adr.ville || "";
+  }
+  function nomSite(lotId){
+    const lot = LOTS[lotId]; if(!lot) return "";
+    const site = SITES[lot.site_id]; if(!site) return "";
+    return site.nom_site || "";
+  }
+
+  function render(demande){
+    if(!demande){ app.innerHTML='<div class="waiting">Aucune demande sélectionnée.</div>'; return; }
+
+    const soc = demande.societe_id ? (SOCIETES[demande.societe_id]||{}) : {};
+    const nomClient = soc.raison_sociale || "Demande";
+    const crit = [];
+    if(demande.type_bien_recherche) crit.push(demande.type_bien_recherche);
+    if(demande.type_transaction) crit.push(demande.type_transaction);
+    if(demande.surface_min||demande.surface_max)
+      crit.push(`${demande.surface_min||'?'}–${demande.surface_max||'?'} m²`);
+    if(demande.budget_max) crit.push('budget ≤ '+euro(demande.budget_max));
+    if(demande.secteurs_recherches) crit.push(demande.secteurs_recherches);
+    if(demande.specificites) crit.push(demande.specificites);
+
+    // Rapprochements de cette demande
+    const rapp = MATCH
+      .filter(m => m.demande_id === demande.id)
+      .sort((a,b)=>(b.score_global||0)-(a.score_global||0));
+
+    let cards;
+    if(rapp.length===0){
+      cards = `<div class="empty">
+        <div class="big">Aucun bien correspondant pour l'instant</div>
+        Le stock actuel ne couvre pas ce besoin. Piste : rentrer un mandat adapté à ce client.
+      </div>`;
+    } else {
+      cards = '<div class="grid">' + rapp.map(m=>{
+        const lot = LOTS[m.lot_id] || {};
+        const loc = lot.type_transaction==='location';
+        const prix = loc ? (lot.loyer_annuel? euro(lot.loyer_annuel)+' /an' : '') 
+                         : (lot.prix_vente? euro(lot.prix_vente) : '');
+        const sub = [];
+        if(m.score_surface!=null) sub.push(`<span class="sub">surface <b>${m.score_surface}</b></span>`);
+        if(m.score_budget!=null) sub.push(`<span class="sub">budget <b>${m.score_budget}</b></span>`);
+        if(m.score_geographie!=null) sub.push(`<span class="sub">géo <b>${m.score_geographie}</b></span>`);
+        if(m.score_transaction!=null) sub.push(`<span class="sub">transac <b>${m.score_transaction}</b></span>`);
+        return `<div class="card">
+          ${ring(m.score_global)}
+          <div class="info">
+            <div class="ref">${lot.reference_lot||''} · ${nomSite(m.lot_id)}</div>
+            <div class="titre">${(lot.usage||'')} · ${lot.surface||'?'} m²</div>
+            <div class="meta">${villeDuLot(m.lot_id)} · ${loc?'location':'vente'}${lot.etage? ' · '+lot.etage:''}</div>
+            <div class="price">${prix}</div>
+            <div class="subscores">${sub.join('')}</div>
+          </div>
+        </div>`;
+      }).join('') + '</div>';
+    }
+
+    app.innerHTML = `
+      <div class="head">
+        <div>
+          <div class="who">${nomClient}</div>
+          <div class="sub">Demande ${demande.statut? '· '+demande.statut : ''}</div>
+          <div class="crit">${crit.map(c=>`<span class="pill">${c}</span>`).join('')}</div>
+        </div>
+        <div class="brand">
+          <div class="logo">or<span class="ia">IA</span>na</div>
+          <div class="tag">FROM DATA TO DEALS</div>
+        </div>
+      </div>
+      <div class="section-title">Biens rapprochés
+        <span class="count">${rapp.length} résultat${rapp.length>1?'s':''}</span>
+      </div>
+      ${cards}
+    `;
+  }
+
+  // --- Connexion Grist ---
+  grist.ready({ requiredAccess:'full' });
+
+  let dernierEnreg = null;
+
+  grist.onRecord(async function(record){
+    dernierEnreg = record;
+    if(Object.keys(LOTS).length===0){ await chargerReferentiels(); }
+    render(record);
+  });
+
+  // Recharge les référentiels si les données changent
+  grist.onRecords(async function(){
+    await chargerReferentiels();
+    if(dernierEnreg) render(dernierEnreg);
+  });
+})();
+</script>
+</body>
+</html>
